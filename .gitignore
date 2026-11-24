@@ -1,0 +1,36 @@
+# Virtualenv created by setup.sh
+.venv/
+
+# Cloned libfreenect tree and local wrapper builds
+vendor/
+
+# MediaPipe pose model. setup.sh and the game download this if it is missing.
+models/*.task
+models/*.partial
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Native / CMake build leftovers outside vendor/
+build/
+dist/
+cmake-build-*/
+*.so
+*.dylib
+*.o
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
