@@ -410,6 +410,80 @@ def draw_neck(surface, points, colors):
     draw_capsule(surface, mid_sh, chin, neck_r, colors["suit"], colors["outline"])
 
 
+def _dist_point_segment(px, py, ax, ay, bx, by):
+    abx, aby = bx - ax, by - ay
+    ab2 = abx * abx + aby * aby
+    if ab2 <= 1e-6:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / ab2))
+    return math.hypot(px - (ax + abx * t), py - (ay + aby * t))
+
+
+def hit_regions(points):
+    """Body shapes used for meteor hits, matched to the drawn avatar.
+
+    Each region is ("circle", x, y, r) or ("capsule", x1, y1, x2, y2, r).
+    Hands and boots are included, so a hit is not limited to the palms.
+    """
+    regions = []
+    frame = head_frame(points)
+    if frame is not None:
+        center, radius, _tilt = frame
+        regions.append(("circle", center[0], center[1], radius * 0.92))
+
+    l_sh, r_sh = _pt(points, L_SHOULDER), _pt(points, R_SHOULDER)
+    l_hip, r_hip = _pt(points, L_HIP), _pt(points, R_HIP)
+    if all((l_sh, r_sh, l_hip, r_hip)):
+        top, bottom = _mid(l_sh, r_sh), _mid(l_hip, r_hip)
+        span = max(_dist(l_sh, r_sh), _dist(l_hip, r_hip))
+        regions.append(
+            ("capsule", top[0], top[1], bottom[0], bottom[1], max(18.0, span * 0.28))
+        )
+
+    for a, b, kind in LIMB_BONES:
+        p1, p2 = _pt(points, a), _pt(points, b)
+        if not p1 or not p2:
+            continue
+        length = _dist(p1, p2)
+        regions.append(
+            ("capsule", p1[0], p1[1], p2[0], p2[1], _limb_radius(length, kind, 1.0))
+        )
+
+    for ankle, foot in ((L_ANKLE, L_FOOT), (R_ANKLE, R_FOOT)):
+        p1, p2 = _pt(points, ankle), _pt(points, foot)
+        if p1 and p2:
+            regions.append(("capsule", p1[0], p1[1], p2[0], p2[1], 11.0))
+
+    for _name, wrist, elbow in HANDS:
+        wrist_p, elbow_p = _pt(points, wrist), _pt(points, elbow)
+        if not wrist_p:
+            continue
+        radius = 12.0
+        if elbow_p:
+            radius = max(10.0, min(16.0, _dist(wrist_p, elbow_p) * 0.22))
+        regions.append(("circle", wrist_p[0], wrist_p[1], radius))
+    return regions
+
+
+def region_hit(regions, x, y, extra=0.0):
+    """True when a circle at (x, y) with padding `extra` overlaps a body region."""
+    for region in regions:
+        if region[0] == "circle":
+            _kind, cx, cy, radius = region
+            if math.hypot(x - cx, y - cy) <= radius + extra:
+                return True
+        else:
+            _kind, ax, ay, bx, by, radius = region
+            if _dist_point_segment(x, y, ax, ay, bx, by) <= radius + extra:
+                return True
+    return False
+
+
+def shift_points(points, dx, dy):
+    """Move a pose dict by a pixel offset."""
+    return {index: (x + dx, y + dy) for index, (x, y) in points.items()}
+
+
 def draw_avatar(surface, points, style="astronaut", sprites=None, zmap=None):
     """Draw the chosen avatar over a dict of {index: (x, y)} landmarks."""
     if not points:
