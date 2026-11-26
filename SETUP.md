@@ -314,6 +314,11 @@ python star_pop.py --avatar none
 
 # Draw a synthetic astronaut and save a PNG, then exit (no camera needed).
 python star_pop.py --preview-avatar avatar_preview.png
+
+# Two players dodge meteors and still pop stars. See README.md.
+python star_pop.py --mode meteors --players 2
+python star_pop.py --webcam --mode meteors --players 2
+python star_pop.py --mouse --mode meteors --players 2
 ```
 
 **How to play:** stand far enough back that your upper body is in the
@@ -323,11 +328,12 @@ dimmed camera view (press **S** to cycle avatar, avatar+skeleton,
 skeleton, or none). In depth mode, hold a hand out toward the Kinect so
 it is the closest point in the depth image. In mouse mode, just move the
 pointer; the full-body avatar is skipped because there is no pose.
-Escape quits.
+Meteor mode is the exception: the mouse (and WASD or the arrows for a
+second player) drives a stand-in body. Escape quits.
 
 The avatar is drawn with pygame shapes, so you do not need any image
 files. If you want to use your own art, drop PNGs into `assets/avatar/`
-(see the README in that folder). You can copy an updated `star_pop.py`,
+(see the README in that folder). You can copy an updated `star_pop.py`, `gameplay.py`,
 `avatar.py`, and `assets/avatar/` over an existing install without
 rerunning `./setup.sh`.
 

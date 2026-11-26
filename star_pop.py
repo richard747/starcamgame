@@ -19,20 +19,29 @@ as --depth. Force the mouse with --mouse. Quit with Escape.
     python star_pop.py --avatar robot
     python star_pop.py --avatar none
     python star_pop.py --preview-avatar avatar_preview.png
+    python star_pop.py --mode meteors --players 2
+    python star_pop.py --preview-meteors meteor_preview.png
 
 In pose mode, S cycles the overlay: avatar, avatar+skeleton, skeleton, none.
 The default is the astronaut avatar with no stick figure. Mouse and depth
 modes have no pose, so the avatar is skipped and the cursor still pops stars.
 
+--mode meteors adds falling rocks and per-player lives. --players 2 tracks
+two bodies (P1 starts on the left). With --mouse, WASD or the arrow keys
+move a second test player.
+
 Headless test:
 
     SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy python star_pop.py --mouse --frames 30
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy python star_pop.py --synthetic --mode meteors --players 2 --frames 300
     SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy python star_pop.py --preview-avatar avatar_preview.png
+    SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy python star_pop.py --preview-meteors meteor_preview.png
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import sys
 import time
@@ -43,9 +52,10 @@ import numpy as np
 import pygame
 
 import avatar
+import gameplay
 
 # Window matches the Kinect v1 color/depth size (640x480).
-WIDTH, HEIGHT = 640, 480
+WIDTH, HEIGHT = gameplay.WIDTH, gameplay.HEIGHT
 FPS = 30
 
 # Depth-mode near-range gate, in millimeters.
@@ -89,7 +99,7 @@ MIN_VISIBILITY = 0.4
 VIEW_MODES = ("avatar", "avatar+skeleton", "skeleton", "none")
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Pop falling stars with your hands, a Kinect, a webcam, or the mouse."
     )
@@ -141,7 +151,51 @@ def parse_args():
         default=0,
         help="Exit after this many frames (useful for automated tests).",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--mode",
+        choices=("stars", "meteors"),
+        default="stars",
+        help="stars pops falling stars. meteors adds rocks to dodge (default: stars).",
+    )
+    parser.add_argument(
+        "--players",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="How many bodies to track. 2 uses MediaPipe num_poses=2 (default: 1).",
+    )
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Drive the game with built-in poses instead of a camera (tests and demos).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for stars and meteors (tests).",
+    )
+    parser.add_argument(
+        "--preview-meteors",
+        nargs="?",
+        const="meteor_preview.png",
+        default=None,
+        metavar="PATH",
+        help="Draw two players dodging meteors, save a PNG, and exit.",
+    )
+    parser.add_argument(
+        "--screenshot",
+        default=None,
+        metavar="PATH",
+        help="Save a frame to this path (use with --frames).",
+    )
+    parser.add_argument(
+        "--screenshot-frame",
+        type=int,
+        default=0,
+        help="Which frame --screenshot saves. 0 saves the last frame.",
+    )
+    return parser.parse_args(argv)
 
 
 def try_import_freenect():
@@ -170,12 +224,13 @@ def ensure_pose_model():
     return MODEL_PATH
 
 
-def create_pose_landmarker():
+def create_pose_landmarker(num_poses=1):
     """Build a MediaPipe Tasks PoseLandmarker in VIDEO mode (CPU).
 
     The current API is mp.tasks.vision.PoseLandmarker. The older
     mp.solutions.pose interface is no longer present in current
-    mediapipe packages.
+    mediapipe packages. num_poses stays 1 unless --players 2, and the
+    lite model stays on the CPU so a Mac Mini can track two people.
     """
     import mediapipe as mp
 
@@ -195,7 +250,7 @@ def create_pose_landmarker():
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(**base_kwargs),
         running_mode=VisionRunningMode.VIDEO,
-        num_poses=1,
+        num_poses=max(1, int(num_poses)),
         min_pose_detection_confidence=0.5,
         min_tracking_confidence=0.5,
     )
@@ -355,61 +410,16 @@ def blit_camera(screen, rgb):
     screen.blit(dim, (0, 0))
 
 
-def draw_skeleton(screen, points):
+def draw_skeleton(screen, points, color=None):
+    bone = color or (160, 220, 255)
+    joint = color or (220, 240, 255)
     for a, b in POSE_BONES:
         if a in points and b in points:
-            pygame.draw.line(screen, (160, 220, 255), points[a], points[b], 3)
+            pygame.draw.line(screen, bone, points[a], points[b], 3)
     for index, pos in points.items():
         radius = 6 if index in HAND_LANDMARKS else 4
-        color = (255, 220, 90) if index in HAND_LANDMARKS else (220, 240, 255)
-        pygame.draw.circle(screen, color, (int(pos[0]), int(pos[1])), radius)
-
-
-class Star:
-    def __init__(self):
-        self.x = random.uniform(30, WIDTH - 30)
-        self.y = random.uniform(-80, -10)
-        self.speed = random.uniform(80, 180)
-        self.radius = random.randint(12, 20)
-        self.color = random.choice(
-            [(255, 214, 90), (255, 245, 200), (255, 170, 80), (200, 220, 255)]
-        )
-
-    def update(self, dt):
-        self.y += self.speed * dt
-
-    def offscreen(self):
-        return self.y - self.radius > HEIGHT
-
-    def hit(self, cursors, reach=28):
-        for cursor in cursors:
-            dx = self.x - cursor[0]
-            dy = self.y - cursor[1]
-            if dx * dx + dy * dy <= (self.radius + reach) ** 2:
-                return True
-        return False
-
-    def draw(self, surface):
-        pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), self.radius)
-        pygame.draw.circle(
-            surface, (255, 255, 255), (int(self.x), int(self.y)), max(3, self.radius // 3)
-        )
-        r = self.radius + 4
-        cx, cy = int(self.x), int(self.y)
-        pygame.draw.line(surface, (255, 255, 255), (cx, cy - r), (cx, cy + r), 1)
-        pygame.draw.line(surface, (255, 255, 255), (cx - r, cy), (cx + r, cy), 1)
-
-
-def smooth_points(previous, current, alpha=CURSOR_SMOOTH):
-    """Exponential smoothing: out = prev + (new - prev) * alpha."""
-    out = {}
-    for key, pos in current.items():
-        if key in previous:
-            px, py = previous[key]
-            out[key] = (px + (pos[0] - px) * alpha, py + (pos[1] - py) * alpha)
-        else:
-            out[key] = pos
-    return out
+        ink = (255, 220, 90) if index in HAND_LANDMARKS and color is None else joint
+        pygame.draw.circle(screen, ink, (int(pos[0]), int(pos[1])), radius)
 
 
 def initial_view_mode(args):
@@ -432,8 +442,12 @@ def initial_view_mode(args):
 def choose_source(args):
     """Pick an input source. Returns (mode, extras).
 
-    mode is one of: 'pose-kinect', 'pose-webcam', 'depth', 'mouse'.
+    mode is one of: 'synthetic', 'pose-kinect', 'pose-webcam', 'depth', 'mouse'.
     """
+    if args.synthetic:
+        print("Synthetic mode: built-in poses, no camera.")
+        return "synthetic", {}
+
     if args.mouse:
         print("Mouse mode (--mouse).")
         return "mouse", {}
@@ -448,16 +462,17 @@ def choose_source(args):
 
     # Default: MediaPipe pose tracking, Kinect RGB then webcam then mouse.
     try:
-        landmarker = create_pose_landmarker()
+        landmarker = create_pose_landmarker(num_poses=args.players)
     except Exception as exc:
         print(f"Could not start MediaPipe Pose Landmarker ({exc}).")
         print("Falling back to the mouse. See SETUP.md for install notes.")
         return "mouse", {}
 
+    tracking = " Tracking two players." if args.players == 2 else ""
     extras = {"landmarker": landmarker}
     freenect = None if args.webcam else try_import_freenect()
     if freenect is not None and open_kinect_rgb(freenect):
-        print("Pose mode: Kinect color camera + MediaPipe Pose Landmarker.")
+        print(f"Pose mode: Kinect color camera + MediaPipe Pose Landmarker.{tracking}")
         return "pose-kinect", {**extras, "freenect": freenect}
 
     if not args.webcam and freenect is None:
@@ -474,7 +489,7 @@ def choose_source(args):
         print("On a Mac, allow Camera access for Terminal in System Settings → Privacy & Security.")
         return "mouse", extras
 
-    print(f"Pose mode: webcam {args.camera} + MediaPipe Pose Landmarker.")
+    print(f"Pose mode: webcam {args.camera} + MediaPipe Pose Landmarker.{tracking}")
     return "pose-webcam", {**extras, "cv2": cv2, "cap": cap}
 
 
@@ -544,6 +559,18 @@ class ScreenText:
         except Exception:
             pass
 
+    def size(self, text, *, small=False):
+        if self.mode == "none":
+            return (0, 0)
+        face = self._small if small else self._font
+        try:
+            if self.mode == "font":
+                return face.size(text)
+            rect = face.get_rect(text)
+            return (rect.width, rect.height)
+        except Exception:
+            return (0, 0)
+
 
 def run_avatar_preview(args):
     """Render a synthetic astronaut/robot pose to a PNG and exit."""
@@ -562,166 +589,322 @@ def run_avatar_preview(args):
     return 0
 
 
-def main():
-    args = parse_args()
+def styles_for(avatar_name, count):
+    """P1 wears the requested suit. P2 wears the other one."""
+    if count <= 1:
+        return [avatar_name]
+    if avatar_name == "robot":
+        return ["robot", "astronaut"]
+    if avatar_name == "none":
+        return ["none", "none"]
+    return ["astronaut", "robot"]
 
-    if args.preview_avatar is not None:
-        return run_avatar_preview(args)
 
-    mode, extras = choose_source(args)
-    view_mode = initial_view_mode(args)
-    avatar_style = args.avatar if args.avatar != "none" else "astronaut"
-    avatar_sprites = {}
+def load_style_sprites(styles):
+    sprites = {}
+    for style in styles:
+        if not style or style == "none" or style in sprites:
+            continue
+        sprites[style] = avatar.load_sprites(style)
+    return sprites
 
-    pygame.init()
-    titles = {
-        "pose-kinect": "Star Pop — Pose (Kinect)",
-        "pose-webcam": "Star Pop — Pose (Webcam)",
-        "depth": "Star Pop — Depth",
-        "mouse": "Star Pop — Mouse",
-    }
-    pygame.display.set_caption(titles.get(mode, "Star Pop"))
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    clock = pygame.time.Clock()
-    text = ScreenText()
-    if args.avatar != "none":
-        avatar_sprites = avatar.load_sprites(avatar_style)
-        if avatar_sprites:
-            print("Loaded avatar sprites: " + ", ".join(sorted(avatar_sprites)))
 
-    stars = [Star() for _ in range(6)]
-    score = 0
-    cursors = [(WIDTH // 2, HEIGHT // 2)]
-    smoothed = {}
-    pose_points = {}
-    extras.setdefault("pose_z", {})
-    camera_frame = None
-    start_ms = time.time() * 1000.0
-    last_timestamp_ms = -1
-    frame = 0
-    running = True
+def make_starfield(count=48, seed=2):
+    rng = random.Random(seed)
+    specks = []
+    for _ in range(count):
+        specks.append(
+            (
+                rng.randrange(WIDTH),
+                rng.randrange(HEIGHT),
+                rng.choice((1, 1, 2)),
+                rng.randrange(140, 220),
+            )
+        )
+    return specks
 
+
+def draw_starfield(surface, specks):
+    surface.fill((8, 12, 28))
+    for x, y, radius, shade in specks:
+        pygame.draw.circle(surface, (shade, shade, min(255, shade + 25)), (x, y), radius)
+
+
+def make_hint(source, view_mode, kind, players):
     labels = {
         "pose-kinect": "Pose · Kinect",
         "pose-webcam": "Pose · Webcam",
         "depth": "Depth",
         "mouse": "Mouse",
+        "synthetic": "Synthetic",
     }
+    short = {
+        "pose-kinect": "Kinect",
+        "pose-webcam": "Webcam",
+        "depth": "Depth",
+        "mouse": "Mouse",
+        "synthetic": "Synthetic",
+    }
+    if kind == "meteors":
+        hint = f"Meteors · {short.get(source, source)}  ·  Esc to quit"
+    else:
+        hint = f"{labels.get(source, source)}  ·  Esc to quit"
+    if source in ("pose-kinect", "pose-webcam", "synthetic"):
+        hint += f"  ·  S view: {view_mode}"
+    if source == "mouse" and players == 2:
+        hint += "  ·  WASD/arrows: P2"
+    return hint
 
-    while running:
-        dt = clock.tick(FPS) / 1000.0
-        frame += 1
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                elif event.key == pygame.K_s:
-                    view_mode = VIEW_MODES[(VIEW_MODES.index(view_mode) + 1) % len(VIEW_MODES)]
+def draw_centered(screen, text, message, y, color, *, small=False):
+    width, _height = text.size(message, small=small)
+    x = (WIDTH - width) // 2 if width else 16
+    text.blit(screen, message, (x, y), color, small=small)
 
-        camera_frame = None
-        pose_points = {}
 
-        if mode == "mouse":
-            cursors = [pygame.mouse.get_pos()]
-        elif mode == "depth":
-            try:
-                depth, millimeters = read_kinect_depth(extras["freenect"])
-            except Exception:
-                depth, millimeters = None, True
-            point = closest_hand_point(depth, millimeters=millimeters) if depth is not None else None
-            if point is not None:
-                smoothed = smooth_points(smoothed, {"depth": point})
-                cursors = [smoothed["depth"]]
-        else:
-            rgb = None
-            try:
-                if mode == "pose-kinect":
-                    rgb = read_kinect_rgb(extras["freenect"])
-                elif mode == "pose-webcam":
-                    rgb = read_webcam_rgb(extras["cv2"], extras["cap"])
-            except Exception:
-                rgb = None
-            if rgb is not None:
-                rgb = mirror_rgb(rgb)
-                camera_frame = rgb
-                # VIDEO mode needs a strictly increasing millisecond timestamp.
-                timestamp_ms = int(time.time() * 1000.0 - start_ms)
-                if timestamp_ms <= last_timestamp_ms:
-                    timestamp_ms = last_timestamp_ms + 1
-                last_timestamp_ms = timestamp_ms
-                try:
-                    result = extras["landmarker"].detect_for_video(
-                        rgb_to_mp_image(rgb), timestamp_ms
-                    )
-                except Exception as exc:
-                    result = None
-                    if frame == 1:
-                        print(f"Pose detection error: {exc}")
-                poses = pose_list(result)
-                if poses:
-                    h, w = rgb.shape[:2]
-                    raw_points, pose_z = landmarks_to_points(poses[0], w, h)
-                    # Scale from the camera frame onto the game window.
-                    if (w, h) != (WIDTH, HEIGHT):
-                        raw_points = {
-                            i: (x * WIDTH / w, y * HEIGHT / h) for i, (x, y) in raw_points.items()
-                        }
-                    pose_points = smooth_points(smoothed, raw_points, alpha=BODY_SMOOTH)
-                    smoothed = pose_points
-                    extras["pose_z"] = pose_z
-                    hands = {
-                        i: pose_points[i] for i in HAND_LANDMARKS if i in pose_points
-                    }
-                    if hands:
-                        cursors = list(hands.values())
+def draw_pips(screen, origin, lives, color, total=gameplay.START_LIVES):
+    for index in range(total):
+        ink = color if index < lives else (70, 76, 96)
+        center = (int(origin[0] + index * 16), int(origin[1]))
+        pygame.draw.circle(screen, ink, center, 5)
+        pygame.draw.circle(screen, (20, 24, 36), center, 5, 1)
 
-        for star in stars:
-            star.update(dt)
-        popped = [star for star in stars if star.hit(cursors)]
-        score += len(popped)
-        stars = [star for star in stars if star not in popped and not star.offscreen()]
-        while len(stars) < 6:
-            stars.append(Star())
 
-        if camera_frame is not None:
-            blit_camera(screen, camera_frame)
-        else:
-            screen.fill((8, 12, 28))
-
-        if pose_points:
-            if view_mode in ("avatar", "avatar+skeleton") and args.avatar != "none":
-                avatar.draw_avatar(
-                    screen,
-                    pose_points,
-                    style=avatar_style,
-                    sprites=avatar_sprites,
-                    zmap=extras.get("pose_z") or {},
-                )
-            if view_mode in ("skeleton", "avatar+skeleton"):
-                draw_skeleton(screen, pose_points)
-
-        for star in stars:
-            star.draw(screen)
-
-        for cursor in cursors:
-            cx, cy = int(cursor[0]), int(cursor[1])
-            pygame.draw.circle(screen, (80, 200, 255), (cx, cy), 22, 2)
-            pygame.draw.circle(screen, (180, 240, 255), (cx, cy), 6)
-
-        hint = labels.get(mode, mode) + "  ·  Esc to quit"
-        if mode.startswith("pose"):
-            hint += f"  ·  S view: {view_mode}"
-        text.blit(screen, f"Score  {score}", (16, 12), (255, 255, 255))
+def draw_hud(screen, text, match, hint, classic):
+    if classic:
+        text.blit(screen, f"Score  {match.total_score}", (16, 12), (255, 255, 255))
         text.blit(screen, hint, (16, 44), (160, 170, 190), small=True)
+        return
 
-        pygame.display.flip()
+    if match.kind == "meteors":
+        draw_centered(screen, text, gameplay.format_clock(match.remaining), 10, (255, 228, 190))
 
-        if args.frames and frame >= args.frames:
-            running = False
+    if match.player_count == 1:
+        pilot = match.pilots[0]
+        text.blit(screen, f"Score  {pilot.score}", (16, 12), (255, 255, 255))
+        draw_pips(screen, (16, 46), pilot.lives, pilot.color)
+        _draw_bottom_hint(screen, text, hint)
+        return
 
+    for pilot, align in zip(match.pilots, ("left", "right")):
+        score = str(pilot.score) if pilot.joined else "--"
+        label = f"{pilot.name}  {score}"
+        if align == "left":
+            x = 16
+            pip_x = 16
+        else:
+            width, _height = text.size(label)
+            x = WIDTH - 16 - width
+            pip_x = WIDTH - 16 - (gameplay.START_LIVES - 1) * 16
+        text.blit(screen, label, (x, 10), pilot.color)
+        if pilot.joined:
+            draw_pips(screen, (pip_x, 40), pilot.lives, pilot.color)
+    _draw_bottom_hint(screen, text, hint)
+
+
+def _draw_bottom_hint(screen, text, hint):
+    bar = pygame.Surface((WIDTH, 26), pygame.SRCALPHA)
+    bar.fill((6, 8, 18, 190))
+    screen.blit(bar, (0, HEIGHT - 26))
+    text.blit(screen, hint, (16, HEIGHT - 22), (186, 194, 210), small=True)
+
+
+def draw_game_over(screen, text, match):
+    shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    shade.fill((5, 8, 18, 170))
+    screen.blit(shade, (0, 0))
+    draw_centered(screen, text, match.title or "Round over", 168, (255, 236, 210))
+    draw_centered(screen, text, match.detail, 208, (220, 226, 236))
+    if match.gesture > 0.05:
+        prompt = "Hold both hands up"
+    else:
+        prompt = "R, Space, or both hands up"
+    draw_centered(screen, text, prompt, 268, (255, 196, 120), small=True)
+    draw_centered(screen, text, "Esc to quit", 296, (160, 170, 190), small=True)
+
+
+def draw_world(screen, text, match, camera, view_mode, sprites, hint, classic, specks, background):
+    if camera is not None:
+        blit_camera(screen, camera)
+    elif background == "starfield":
+        draw_starfield(screen, specks)
+    else:
+        screen.fill((8, 12, 28))
+
+    pilots = [pilot for pilot in match.pilots if pilot.present and pilot.points]
+    pilots.sort(key=lambda pilot: pilot.anchor[1] if pilot.anchor else 0)
+    show_avatar = view_mode in ("avatar", "avatar+skeleton")
+    show_skeleton = view_mode in ("skeleton", "avatar+skeleton")
+    for pilot in pilots:
+        if show_avatar and pilot.style in avatar.STYLES:
+            avatar.draw_avatar(
+                screen,
+                pilot.points,
+                style=pilot.style,
+                sprites=sprites.get(pilot.style) or {},
+                zmap=pilot.zmap,
+            )
+        if show_skeleton:
+            color = None if classic else pilot.color
+            draw_skeleton(screen, pilot.points, color=color)
+        if pilot.invuln > 0 and pilot.anchor is not None:
+            pulse = 2 + int((math.sin(match.elapsed * 22) + 1) * 1.5)
+            ink = (255, 96, 72) if int(match.elapsed * 12) % 2 == 0 else (255, 255, 255)
+            pygame.draw.circle(
+                screen, ink, (int(pilot.anchor[0]), int(pilot.anchor[1])), 46, pulse
+            )
+
+    for meteor in match.meteors:
+        meteor.draw(screen)
+    for star in match.stars:
+        star.draw(screen)
+    for impact in match.impacts:
+        impact.draw(screen)
+
+    for pilot in match.pilots:
+        if classic:
+            ring, core, radius = (80, 200, 255), (180, 240, 255), 22
+        else:
+            ring, core, radius = pilot.color, (255, 255, 255), 16
+        for cursor in pilot.cursors:
+            cx, cy = int(cursor[0]), int(cursor[1])
+            pygame.draw.circle(screen, ring, (cx, cy), radius, 2)
+            pygame.draw.circle(screen, core, (cx, cy), 5 if not classic else 6)
+
+    draw_hud(screen, text, match, hint, classic)
+    if match.over:
+        draw_game_over(screen, text, match)
+
+
+def body_at(cursor, reach):
+    """A full test body whose torso sits on the cursor."""
+    pose = avatar.synthetic_pose(WIDTH, HEIGHT, reach=reach)
+    anchor = gameplay.pose_anchor(pose) or (WIDTH / 2, HEIGHT / 2)
+    return avatar.shift_points(pose, cursor[0] - anchor[0], cursor[1] - anchor[1])
+
+
+def move_point(pos, keys, dt, speed=300.0):
+    vx = float((keys[pygame.K_RIGHT] or keys[pygame.K_d]) - (keys[pygame.K_LEFT] or keys[pygame.K_a]))
+    vy = float((keys[pygame.K_DOWN] or keys[pygame.K_s]) - (keys[pygame.K_UP] or keys[pygame.K_w]))
+    if vx and vy:
+        vx *= 0.7071
+        vy *= 0.7071
+    x = min(WIDTH - 24, max(24, pos[0] + vx * speed * dt))
+    y = min(HEIGHT - 24, max(24, pos[1] + vy * speed * dt))
+    return (x, y)
+
+
+def synthetic_detections(frame_index, players):
+    """Two built-in bodies that cross the screen, for headless play."""
+    t = frame_index / float(FPS)
+    if players <= 1:
+        centers = [WIDTH * 0.5 + math.sin(t * 0.8) * 120]
+        reaches = ["left"]
+    else:
+        swing = math.sin(t * 0.65) * 170
+        centers = [WIDTH * 0.5 + swing, WIDTH * 0.5 - swing]
+        reaches = ["left", "right"]
+    detections = []
+    for index, (cx, reach) in enumerate(zip(centers, reaches)):
+        pose = avatar.synthetic_pose(WIDTH, HEIGHT, reach=reach)
+        anchor = gameplay.pose_anchor(pose) or (WIDTH / 2, HEIGHT / 2)
+        dx = cx - anchor[0]
+        dy = math.sin(t * 2.0 + index) * 10
+        detections.append((avatar.shift_points(pose, dx, dy), {}))
+    return detections
+
+
+def read_pose_detections(mode, extras, state):
+    """Read one camera frame and return (rgb or None, pose detections)."""
+    rgb = None
+    try:
+        if mode == "pose-kinect":
+            rgb = read_kinect_rgb(extras["freenect"])
+        elif mode == "pose-webcam":
+            rgb = read_webcam_rgb(extras["cv2"], extras["cap"])
+    except Exception:
+        rgb = None
+    if rgb is None:
+        return None, []
+    rgb = mirror_rgb(rgb)
+    # VIDEO mode needs a strictly increasing millisecond timestamp.
+    timestamp_ms = int(time.time() * 1000.0 - state["start_ms"])
+    if timestamp_ms <= state["last_timestamp_ms"]:
+        timestamp_ms = state["last_timestamp_ms"] + 1
+    state["last_timestamp_ms"] = timestamp_ms
+    try:
+        result = extras["landmarker"].detect_for_video(rgb_to_mp_image(rgb), timestamp_ms)
+    except Exception as exc:
+        if state["frame"] == 1:
+            print(f"Pose detection error: {exc}")
+        return rgb, []
+    height, width = rgb.shape[:2]
+    detections = []
+    for pose in pose_list(result):
+        raw, zmap = landmarks_to_points(pose, width, height)
+        if (width, height) != (WIDTH, HEIGHT):
+            raw = {i: (x * WIDTH / width, y * HEIGHT / height) for i, (x, y) in raw.items()}
+        detections.append((raw, zmap))
+    return rgb, detections
+
+
+def render_meteor_preview(path):
+    """Save a still of two players, stars, meteors, and a hit flash."""
+    dest = Path(path)
+    if not dest.is_absolute():
+        dest = Path(__file__).resolve().parent / dest
+    pygame.init()
+    try:
+        pygame.display.set_mode((1, 1))
+    except Exception:
+        pass
+    surface = pygame.Surface((WIDTH, HEIGHT))
+    text = ScreenText()
+    styles = styles_for("astronaut", 2)
+    match = gameplay.Match("meteors", 2, styles, seed=4)
+    left = avatar.shift_points(avatar.synthetic_pose(WIDTH, HEIGHT, reach="left"), -155, 8)
+    right = avatar.shift_points(avatar.synthetic_pose(WIDTH, HEIGHT, reach="right"), 155, 4)
+    match.observe_body(0, left)
+    match.observe_body(1, right)
+    match.pilots[0].score = 5
+    match.pilots[1].score = 8
+    match.pilots[0].lives = 2
+    match.elapsed = gameplay.ROUND_SECONDS - 27
+    match.stars.clear()
+    reaching = right.get(19) or right.get(20) or (520, 70)
+    star_near_hand = gameplay.Star(match.rng)
+    star_near_hand.x, star_near_hand.y = reaching[0] - 8, reaching[1] - 34
+    star_mid = gameplay.Star(match.rng)
+    star_mid.x, star_mid.y = 248, 96
+    match.stars = [star_near_hand, star_mid]
+    match.meteors = []
+    for x, y, radius in ((96, 210, 16), (318, 168, 18), (318, 40, 14), (575, 188, 17)):
+        rock = gameplay.Meteor(match.rng, 12, x=x, y=y)
+        rock.radius = radius
+        match.meteors.append(rock)
+    impact = gameplay.Impact(168, 292)
+    impact.age = 0.16
+    match.impacts = [impact]
+    draw_world(
+        surface,
+        text,
+        match,
+        None,
+        "avatar",
+        load_style_sprites(styles),
+        make_hint("pose-webcam", "avatar", "meteors", 2),
+        False,
+        make_starfield(),
+        "starfield",
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    pygame.image.save(surface, str(dest))
+    print(f"Wrote meteor preview to {dest}")
+    pygame.quit()
+    return 0
+
+
+def release_inputs(extras):
     if extras.get("cap") is not None:
         extras["cap"].release()
     landmarker = extras.get("landmarker")
@@ -737,8 +920,154 @@ def main():
         except Exception:
             pass
 
-    pygame.quit()
-    print(f"Done. Frames: {frame}. Score: {score}. Mode: {mode}.")
+
+def main():
+    args = parse_args()
+
+    if args.preview_avatar is not None:
+        return run_avatar_preview(args)
+    if args.preview_meteors is not None:
+        return render_meteor_preview(args.preview_meteors)
+
+    mode, extras = choose_source(args)
+    player_count = args.players
+    if mode == "depth" and player_count > 1:
+        print("Depth mode tracks one closest point, so this round is single-player.")
+        player_count = 1
+
+    view_mode = initial_view_mode(args)
+    styles = styles_for(args.avatar, player_count)
+    classic = args.mode == "stars" and player_count == 1
+    match = gameplay.Match(
+        args.mode,
+        player_count,
+        styles,
+        seed=args.seed,
+        sticky_cursors=classic,
+        smooth=BODY_SMOOTH,
+    )
+    sprites = load_style_sprites(styles)
+    loaded = sorted({name for group in sprites.values() for name in group})
+    if loaded:
+        print("Loaded avatar sprites: " + ", ".join(loaded))
+
+    pygame.init()
+    titles = {
+        "pose-kinect": "Star Pop — Pose (Kinect)",
+        "pose-webcam": "Star Pop — Pose (Webcam)",
+        "depth": "Star Pop — Depth",
+        "mouse": "Star Pop — Mouse",
+        "synthetic": "Star Pop — Synthetic",
+    }
+    caption = "Star Pop — Meteors" if args.mode == "meteors" else titles.get(mode, "Star Pop")
+    pygame.display.set_caption(caption)
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    clock = pygame.time.Clock()
+    text = ScreenText()
+    specks = make_starfield()
+    background = "starfield" if args.mode == "meteors" or mode == "synthetic" else "flat"
+    smoothed_depth = {}
+    p2_pos = (WIDTH * 0.73, HEIGHT * 0.56)
+    pose_state = {"start_ms": time.time() * 1000.0, "last_timestamp_ms": -1, "frame": 0}
+    frame = 0
+    running = True
+    saved_shot = False
+    pose_sources = ("pose-kinect", "pose-webcam", "synthetic")
+
+    try:
+        while running:
+            dt = clock.tick(FPS) / 1000.0
+            if dt <= 0:
+                dt = 1.0 / FPS
+            dt = min(dt, 0.05)
+            frame += 1
+            pose_state["frame"] = frame
+            restart_key = False
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    elif event.key == pygame.K_s and mode in pose_sources:
+                        view_mode = VIEW_MODES[(VIEW_MODES.index(view_mode) + 1) % len(VIEW_MODES)]
+                    elif event.key in (pygame.K_r, pygame.K_SPACE) and match.over:
+                        restart_key = True
+
+            camera = None
+            if mode == "synthetic":
+                match.observe_poses(synthetic_detections(frame, player_count), dt)
+            elif mode == "mouse":
+                pointer = pygame.mouse.get_pos()
+                if player_count >= 2:
+                    p2_pos = move_point(p2_pos, pygame.key.get_pressed(), dt)
+                if args.mode == "meteors":
+                    match.observe_body(0, body_at(pointer, "left"))
+                    if player_count >= 2:
+                        match.observe_body(1, body_at(p2_pos, "right"))
+                else:
+                    match.observe_cursors(0, [pointer])
+                    if player_count >= 2:
+                        match.observe_cursors(1, [p2_pos])
+            elif mode == "depth":
+                try:
+                    depth, millimeters = read_kinect_depth(extras["freenect"])
+                except Exception:
+                    depth, millimeters = None, True
+                point = closest_hand_point(depth, millimeters=millimeters) if depth is not None else None
+                if point is not None:
+                    smoothed_depth = gameplay.smooth_points(
+                        smoothed_depth, {"depth": point}, CURSOR_SMOOTH
+                    )
+                    point = smoothed_depth["depth"]
+                    hit_radius = 36 if args.mode == "meteors" else 0
+                    match.observe_cursors(0, [point], hit_radius=hit_radius)
+                else:
+                    match.observe_cursors(0, None)
+            else:
+                camera, detections = read_pose_detections(mode, extras, pose_state)
+                match.observe_poses(detections, dt)
+
+            raised = any(
+                gameplay.both_hands_raised(pilot.points)
+                for pilot in match.pilots
+                if pilot.present
+            )
+            if restart_key and match.over:
+                match.restart()
+            else:
+                match.note_gesture(raised, dt)
+            match.step(dt)
+
+            hint = make_hint(mode, view_mode, args.mode, player_count)
+            draw_world(
+                screen, text, match, camera, view_mode, sprites, hint, classic, specks, background
+            )
+            pygame.display.flip()
+
+            if args.screenshot and args.screenshot_frame and frame == args.screenshot_frame:
+                pygame.image.save(screen, args.screenshot)
+                saved_shot = True
+            if args.frames and frame >= args.frames:
+                running = False
+    finally:
+        if args.screenshot and not saved_shot:
+            try:
+                pygame.image.save(screen, args.screenshot)
+            except Exception:
+                pass
+        release_inputs(extras)
+        pygame.quit()
+
+    print(f"Done. Frames: {frame}. Score: {match.total_score}. Mode: {mode}.")
+    if player_count > 1 or args.mode == "meteors":
+        summary = "  ".join(
+            f"{pilot.name} score {pilot.score} lives {pilot.lives}" for pilot in match.pilots
+        )
+        print(summary)
+        if match.over:
+            print(match.title)
     return 0
 
 
