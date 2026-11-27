@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#080c1c" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Star Pop" />
+    <meta
+      name="description"
+      content="Pop falling stars and dodge meteors with your body. Uses the camera in the browser."
+    />
+    <link rel="icon" href="%BASE_URL%icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="%BASE_URL%icons/apple-touch-icon.png" />
+    <title>Star Pop</title>
+  </head>
+  <body>
+    <video id="camera" playsinline muted></video>
+    <canvas id="game" width="640" height="480"></canvas>
+    <section id="start" class="panel">
+      <div class="card">
+        <h1>Star Pop</h1>
+        <p class="lede">Pop stars with your hands. In meteor mode, dodge with your whole body.</p>
+        <p class="kinect">This page uses the webcam. An Xbox Kinect cannot be connected in the browser.</p>
+        <div class="field">
+          <span id="mode-label">Mode</span>
+          <div class="choices" role="group" aria-labelledby="mode-label">
+            <button type="button" id="mode-stars" data-mode="stars" aria-pressed="true">Stars</button>
+            <button type="button" id="mode-meteors" data-mode="meteors" aria-pressed="false">Meteors</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="players-label">Players</span>
+          <div class="choices" role="group" aria-labelledby="players-label">
+            <button type="button" id="players-1" data-players="1" aria-pressed="true">1</button>
+            <button type="button" id="players-2" data-players="2" aria-pressed="false">2</button>
+          </div>
+        </div>
+        <div class="field">
+          <span id="suit-label">P1 suit</span>
+          <div class="choices" role="group" aria-labelledby="suit-label">
+            <button type="button" id="suit-astronaut" data-suit="astronaut" aria-pressed="true">Astronaut</button>
+            <button type="button" id="suit-robot" data-suit="robot" aria-pressed="false">Android</button>
+          </div>
+        </div>
+        <button type="button" class="primary" id="start-camera">Start camera</button>
+        <button type="button" class="secondary" id="start-demo">Demo bodies</button>
+        <p class="hint">Keys: arrows change mode and players, Enter starts, S cycles the view, Esc returns here.</p>
+      </div>
+    </section>
+    <div id="toolbar" class="toolbar" hidden>
+      <button type="button" id="view-btn">View</button>
+      <button type="button" id="restart-btn" hidden>Again</button>
+      <button type="button" id="menu-btn">Menu</button>
+    </div>
+    <p id="status" class="status" role="status"></p>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
