@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Procedural pose-driven avatars for Star Pop.
 
-The default style is a cartoon space explorer. A robot style is also
-included. Both are drawn with pygame shapes, following MediaPipe Pose
-landmarks (33-point BlazePose). Optional PNG sprites in assets/avatar/
-are used when present; see that folder's README.
+The default style is a cartoon space explorer. The robot style is a
+sleek humanoid android in the same steel-blue and cyan colors. Both are
+drawn with pygame shapes, following MediaPipe Pose landmarks (33-point
+BlazePose). Optional PNG sprites in assets/avatar/ are used when
+present; see that folder's README.
 """
 
 from __future__ import annotations
@@ -13,6 +14,11 @@ import math
 from pathlib import Path
 
 import pygame
+
+try:
+    import pygame.gfxdraw as gfxdraw
+except Exception:  # pragma: no cover - pygame-ce ships gfxdraw
+    gfxdraw = None
 
 # MediaPipe Pose landmark indices.
 NOSE, L_EYE, R_EYE = 0, 2, 5
@@ -157,6 +163,332 @@ def draw_capsule(surface, p1, p2, radius, fill, outline=None, outline_width=2):
         pygame.draw.circle(surface, outline, _i(p2), radius, outline_width)
 
 
+def _lerp(a, b, t):
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+
+def _mix(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+def _basis(tilt):
+    """Ear-to-ear axis, then the axis that points toward the chin."""
+    return (math.cos(tilt), math.sin(tilt)), (-math.sin(tilt), math.cos(tilt))
+
+
+def _local(center, basis_x, basis_y, lx, ly):
+    return (
+        center[0] + basis_x[0] * lx + basis_y[0] * ly,
+        center[1] + basis_x[1] * lx + basis_y[1] * ly,
+    )
+
+
+def _aa_polygon(surface, points, fill, outline=None, stroke=1):
+    ip = [_i(p) for p in points]
+    if len(ip) < 3:
+        return
+    pygame.draw.polygon(surface, fill, ip)
+    if outline is not None and stroke:
+        pygame.draw.polygon(surface, outline, ip, stroke)
+    if gfxdraw is not None:
+        try:
+            gfxdraw.aapolygon(surface, ip, outline or fill)
+        except Exception:
+            pass
+
+
+def _aa_circle(surface, center, radius, fill, outline=None):
+    r = max(1, int(round(radius)))
+    c = _i(center)
+    if outline is not None:
+        pygame.draw.circle(surface, outline, c, r + 1, 1)
+    pygame.draw.circle(surface, fill, c, r)
+    if gfxdraw is not None:
+        try:
+            gfxdraw.aacircle(surface, c[0], c[1], r, outline or fill)
+        except Exception:
+            pass
+
+
+def _oval_points(center, rx, ry, tilt, steps=20):
+    basis_x, basis_y = _basis(tilt)
+    points = []
+    for i in range(steps):
+        angle = (i / steps) * math.tau
+        points.append(
+            _local(center, basis_x, basis_y, math.cos(angle) * rx, math.sin(angle) * ry)
+        )
+    return points
+
+
+def _oval_arc(center, rx, ry, tilt, a0, a1, steps=10):
+    basis_x, basis_y = _basis(tilt)
+    points = []
+    for i in range(steps + 1):
+        angle = a0 + (a1 - a0) * (i / steps)
+        points.append(
+            _local(center, basis_x, basis_y, math.cos(angle) * rx, math.sin(angle) * ry)
+        )
+    return points
+
+
+def _cross_section(l_sh, r_sh, l_hip, r_hip, t, scale):
+    left = _lerp(l_sh, l_hip, t)
+    right = _lerp(r_sh, r_hip, t)
+    mid = _mid(left, right)
+    left = (mid[0] + (left[0] - mid[0]) * scale, mid[1] + (left[1] - mid[1]) * scale)
+    right = (mid[0] + (right[0] - mid[0]) * scale, mid[1] + (right[1] - mid[1]) * scale)
+    return left, right
+
+
+def draw_tapered_limb(surface, p1, p2, r1, r2, fill, outline=None):
+    """A rounded limb that narrows from r1 at p1 to r2 at p2."""
+    length = _dist(p1, p2)
+    if length < 2:
+        return
+    r1 = max(1.5, r1)
+    r2 = max(1.2, r2)
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    ax, ay = _perp(dx, dy, r1)
+    bx, by = _perp(dx, dy, r2)
+    quad = [
+        (p1[0] + ax, p1[1] + ay),
+        (p2[0] + bx, p2[1] + by),
+        (p2[0] - bx, p2[1] - by),
+        (p1[0] - ax, p1[1] - ay),
+    ]
+    _aa_polygon(surface, quad, fill, outline, 1)
+    _aa_circle(surface, p1, r1, fill, outline)
+    _aa_circle(surface, p2, r2, fill, outline)
+    # A thin highlight so the limb reads as round instead of flat.
+    light = _mix(fill, (255, 255, 255), 0.28)
+    shift = min(r1, r2) * 0.32
+    ox, oy = _perp(dx, dy, shift)
+    pygame.draw.aaline(
+        surface,
+        light,
+        _i((p1[0] + ox, p1[1] + oy)),
+        _i((p2[0] + ox, p2[1] + oy)),
+    )
+
+
+def _robot_taper(length, kind):
+    """Proximal and distal thickness. Upper segments stay thicker."""
+    length = max(8.0, length)
+    table = {
+        "upper_arm": (0.20, 0.13, 7.0, 15.0, 4.5, 10.0),
+        "lower_arm": (0.14, 0.075, 4.5, 10.0, 3.0, 7.0),
+        "thigh": (0.22, 0.15, 8.0, 18.0, 5.5, 12.0),
+        "shin": (0.15, 0.09, 5.5, 12.0, 3.5, 8.0),
+    }
+    near, far, near_lo, near_hi, far_lo, far_hi = table.get(
+        kind, (0.16, 0.10, 5.0, 12.0, 3.5, 8.0)
+    )
+    r1 = min(near_hi, max(near_lo, length * near))
+    r2 = min(far_hi, max(far_lo, length * far))
+    return r1, r2
+
+
+def draw_robot_limb(surface, p1, p2, kind, colors):
+    length = _dist(p1, p2)
+    if length < 3:
+        return
+    r1, r2 = _robot_taper(length, kind)
+    draw_tapered_limb(surface, p1, p2, r1, r2, colors["suit"], colors["outline"])
+
+
+def draw_robot_hinge(surface, points, joint, proximal, distal, colors):
+    """A small pin at the elbow or knee, skipped when that joint is hidden."""
+    center = _pt(points, joint)
+    if center is None:
+        return
+    span = 0.0
+    for other in (proximal, distal):
+        end = _pt(points, other)
+        if end is not None:
+            span = max(span, _dist(center, end))
+    if span < 4:
+        return
+    radius = min(11.0, max(5.0, span * 0.15))
+    _aa_circle(surface, center, radius, colors["joint"], colors["outline"])
+    _aa_circle(surface, center, radius * 0.52, colors["suit_shadow"], None)
+    pygame.draw.circle(surface, colors["accent"], _i(center), max(1, int(radius * 0.22)))
+
+
+def draw_robot_torso(surface, points, colors):
+    """Shoulders taper to a waist, then ease back out at the hips."""
+    l_sh, r_sh = _pt(points, L_SHOULDER), _pt(points, R_SHOULDER)
+    l_hip, r_hip = _pt(points, L_HIP), _pt(points, R_HIP)
+    if not all((l_sh, r_sh, l_hip, r_hip)):
+        return
+    samples = (
+        (0.00, 1.06),
+        (0.14, 0.98),
+        (0.32, 0.78),
+        (0.50, 0.58),
+        (0.66, 0.46),
+        (0.84, 0.82),
+        (1.00, 1.10),
+    )
+    left, right = [], []
+    for t, scale in samples:
+        side_l, side_r = _cross_section(l_sh, r_sh, l_hip, r_hip, t, scale)
+        left.append(side_l)
+        right.append(side_r)
+    mid = _mid(left[0], right[0])
+    hip_mid = _mid(left[-1], right[-1])
+    peak = _offset(mid, _angle(hip_mid, mid), _dist(l_sh, r_sh) * 0.06)
+    _aa_polygon(surface, left + list(reversed(right)) + [peak], colors["suit"], colors["outline"], 2)
+
+    chest_l, chest_r = [], []
+    for t, scale in ((0.16, 0.58), (0.28, 0.50), (0.40, 0.42), (0.50, 0.36)):
+        side_l, side_r = _cross_section(l_sh, r_sh, l_hip, r_hip, t, scale)
+        chest_l.append(side_l)
+        chest_r.append(side_r)
+    _aa_polygon(
+        surface,
+        chest_l + list(reversed(chest_r)),
+        colors["suit_shadow"],
+        colors["outline"],
+        1,
+    )
+    sternum_top = _lerp(_mid(chest_l[0], chest_r[0]), _mid(chest_l[-1], chest_r[-1]), 0.18)
+    sternum_bot = _lerp(_mid(chest_l[0], chest_r[0]), _mid(chest_l[-1], chest_r[-1]), 0.78)
+    draw_tapered_limb(surface, sternum_top, sternum_bot, 3.4, 2.2, colors["accent"], colors["outline"])
+
+    span = _dist(l_hip, r_hip)
+    axis = _angle(l_hip, r_hip)
+    hip_mid = _mid(l_hip, r_hip)
+    for hip in (l_hip, r_hip):
+        plate = _lerp(hip, hip_mid, 0.28)
+        _aa_polygon(
+            surface,
+            _oval_points(plate, max(7.0, span * 0.15), max(5.0, span * 0.10), axis, 14),
+            colors["pack"],
+            colors["outline"],
+            1,
+        )
+    socket = max(6.0, _dist(l_sh, r_sh) * 0.09)
+    for shoulder in (l_sh, r_sh):
+        _aa_circle(surface, shoulder, socket, colors["suit"], colors["outline"])
+
+
+def draw_robot_head(surface, points, colors):
+    """Oval face: eye visor, jaw line, no box and no antenna."""
+    frame = head_frame(points)
+    if frame is None:
+        return
+    center, radius, tilt = frame
+    basis_x, basis_y = _basis(tilt)
+    rx, ry = radius * 0.86, radius * 1.08
+    _aa_polygon(surface, _oval_points(center, rx, ry, tilt, 22), colors["helmet"], colors["outline"], 2)
+    # Lower face plate. Parameter 0 is ear-to-ear; pi/2 points at the chin.
+    chin = _oval_arc(center, rx * 0.90, ry * 0.94, tilt, 0.45, math.pi - 0.45, 12)
+    if len(chin) >= 3:
+        _aa_polygon(surface, chin, colors["suit_shadow"], None, 0)
+        pygame.draw.aaline(surface, colors["outline"], _i(chin[0]), _i(chin[-1]))
+        jaw = _oval_arc(center, rx * 0.62, ry * 0.42, tilt, 0.70, math.pi - 0.70, 8)
+        if len(jaw) >= 2:
+            pygame.draw.aalines(surface, colors["outline"], False, [_i(p) for p in jaw])
+
+    visor_c = _local(center, basis_x, basis_y, 0, -ry * 0.10)
+    _aa_polygon(
+        surface,
+        _oval_points(visor_c, rx * 0.60, ry * 0.30, tilt, 16),
+        colors["visor"],
+        colors["visor_rim"],
+        1,
+    )
+    for side in (-1, 1):
+        eye = _local(visor_c, basis_x, basis_y, side * rx * 0.26, ry * 0.02)
+        _aa_polygon(
+            surface,
+            _oval_points(eye, max(2.5, rx * 0.15), max(2.0, ry * 0.09), tilt, 12),
+            colors["accent"],
+            None,
+            0,
+        )
+        glint = _local(eye, basis_x, basis_y, -rx * 0.04, -ry * 0.025)
+        pygame.draw.circle(surface, colors["visor_shine"], _i(glint), max(1, int(rx * 0.045)))
+    for side in (-1, 1):
+        node = _local(center, basis_x, basis_y, side * rx * 0.92, ry * 0.02)
+        _aa_circle(surface, node, max(2.5, rx * 0.10), colors["suit_shadow"], colors["outline"])
+
+
+def draw_robot_neck(surface, points, colors):
+    frame = head_frame(points)
+    l_sh, r_sh = _pt(points, L_SHOULDER), _pt(points, R_SHOULDER)
+    if frame is None or l_sh is None or r_sh is None:
+        return
+    center, radius, tilt = frame
+    mid = _mid(l_sh, r_sh)
+    chin = _offset(center, tilt + math.pi / 2, radius * 0.96)
+    if _dist(chin, mid) < 4:
+        return
+    span = _dist(l_sh, r_sh)
+    draw_tapered_limb(
+        surface,
+        chin,
+        mid,
+        max(3.5, span * 0.055),
+        max(5.0, span * 0.09),
+        colors["suit"],
+        colors["outline"],
+    )
+    pygame.draw.circle(surface, colors["outline"], _i(mid), max(4, int(span * 0.10)), 1)
+
+
+def draw_robot_hand(surface, points, wrist_id, elbow_id, colors):
+    """Palm, three fingers, and a thumb. Hidden when the wrist is hidden."""
+    wrist = _pt(points, wrist_id)
+    if wrist is None:
+        return
+    elbow = _pt(points, elbow_id)
+    index_id = 19 if wrist_id == L_WRIST else 20
+    index = _pt(points, index_id)
+    if index is not None and _dist(wrist, index) > 4:
+        direction = _angle(wrist, index)
+        reach = _dist(wrist, index)
+    elif elbow is not None:
+        direction = _angle(elbow, wrist)
+        reach = max(12.0, _dist(elbow, wrist) * 0.28)
+    else:
+        direction = math.pi / 2
+        reach = 14.0
+    palm_r = min(13.0, max(6.0, reach * 0.62))
+    palm = _offset(wrist, direction, palm_r * 0.35)
+    _aa_circle(surface, palm, palm_r, _mix(colors["glove"], colors["suit"], 0.55), colors["outline"])
+    finger_len = min(18.0, max(9.0, reach * 0.95))
+    knuckle = _offset(palm, direction, palm_r * 0.78)
+    side = direction + math.pi / 2
+    for slot in (-1, 0, 1):
+        base = _offset(knuckle, side, slot * max(4.5, palm_r * 0.62))
+        tip = _offset(base, direction + slot * 0.34, finger_len)
+        pygame.draw.line(surface, colors["suit"], _i(base), _i(tip), 3)
+        pygame.draw.circle(surface, colors["joint"], _i(tip), 2)
+        pygame.draw.circle(surface, colors["outline"], _i(tip), 2, 1)
+    thumb_sign = -1 if wrist_id == L_WRIST else 1
+    thumb_base = _offset(palm, direction + thumb_sign * 1.35, palm_r * 0.2)
+    thumb_tip = _offset(thumb_base, direction + thumb_sign * 0.95, finger_len * 0.78)
+    pygame.draw.line(surface, colors["suit"], _i(thumb_base), _i(thumb_tip), 3)
+    pygame.draw.circle(surface, colors["joint"], _i(thumb_tip), 2)
+    pygame.draw.circle(surface, colors["outline"], _i(thumb_tip), 2, 1)
+
+
+def draw_robot_foot(surface, ankle, toe, colors):
+    if ankle is None:
+        return
+    if toe is None or _dist(ankle, toe) < 4:
+        toe = (ankle[0], ankle[1] + 16)
+    direction = _angle(ankle, toe)
+    heel = _offset(ankle, direction + math.pi, 4)
+    toe = _offset(toe, direction, 7)
+    draw_tapered_limb(surface, heel, toe, 6.5, 4.2, colors["boot"], colors["outline"])
+    sole = _offset(toe, direction, 1.5)
+    pygame.draw.circle(surface, colors["boot_sole"], _i(sole), 3)
+    pygame.draw.circle(surface, colors["outline"], _i(sole), 3, 1)
+
+
 def _expand_quad(corners, padding):
     cx = sum(p[0] for p in corners) / 4.0
     cy = sum(p[1] for p in corners) / 4.0
@@ -275,6 +607,9 @@ def draw_torso(surface, points, colors, sprites, style):
         width = max(_dist(l_sh, r_sh), _dist(l_hip, r_hip)) * 1.25
         blit_along_bone(surface, sprites["torso"], top, bottom, thickness=width / 2)
         return
+    if style == "robot":
+        draw_robot_torso(surface, points, colors)
+        return
     corners = _expand_quad([l_sh, r_sh, r_hip, l_hip], 10)
     pygame.draw.polygon(surface, colors["suit"], corners)
     pygame.draw.polygon(surface, colors["outline"], corners, 3)
@@ -326,34 +661,7 @@ def draw_head(surface, points, colors, sprites, style):
     px, py = -dy, dx
 
     if style == "robot":
-        hw, hh = radius * 0.95, radius * 0.9
-        corners = [
-            (center[0] + dx * hw + px * hh, center[1] + dy * hw + py * hh),
-            (center[0] - dx * hw + px * hh, center[1] - dy * hw + py * hh),
-            (center[0] - dx * hw - px * hh, center[1] - dy * hw - py * hh),
-            (center[0] + dx * hw - px * hh, center[1] + dy * hw - py * hh),
-        ]
-        pygame.draw.polygon(surface, colors["helmet"], corners)
-        pygame.draw.polygon(surface, colors["outline"], corners, 3)
-        bar_c = _offset(center, tilt + math.pi / 2, radius * 0.08)
-        bar_w, bar_h = radius * 1.15, radius * 0.32
-        bar = []
-        for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
-            bar.append(
-                (
-                    bar_c[0] + dx * bar_w * 0.5 * sx + px * bar_h * 0.5 * sy,
-                    bar_c[1] + dy * bar_w * 0.5 * sx + py * bar_h * 0.5 * sy,
-                )
-            )
-        pygame.draw.polygon(surface, colors["visor"], bar)
-        pygame.draw.polygon(surface, colors["visor_rim"], bar, 2)
-        shine = _offset(bar_c, tilt, -bar_w * 0.15)
-        pygame.draw.circle(surface, colors["visor_shine"], _i(shine), max(2, int(radius * 0.08)))
-        tip = _offset(center, tilt - math.pi / 2, radius * 1.35)
-        base = _offset(center, tilt - math.pi / 2, radius * 0.95)
-        pygame.draw.line(surface, colors["outline"], _i(base), _i(tip), 3)
-        pygame.draw.circle(surface, colors["accent"], _i(tip), 5)
-        pygame.draw.circle(surface, colors["outline"], _i(tip), 5, 1)
+        draw_robot_head(surface, points, colors)
         return
 
     # Astronaut helmet: white sphere, gold band, dark visor.
@@ -516,11 +824,10 @@ def draw_avatar(surface, points, style="astronaut", sprites=None, zmap=None):
                 radius = _limb_radius(length, name, 1.0)
                 if name in sprites:
                     blit_along_bone(surface, sprites[name], p1, p2, thickness=radius)
+                elif style == "robot":
+                    draw_robot_limb(surface, p1, p2, name, colors)
                 else:
                     draw_capsule(surface, p1, p2, radius, colors["suit"], colors["outline"])
-                if style == "robot":
-                    pygame.draw.circle(surface, colors["joint"], _i(p1), max(4, int(radius * 0.7)))
-                    pygame.draw.circle(surface, colors["outline"], _i(p1), max(4, int(radius * 0.7)), 2)
             elif kind == "glove":
                 radius = 11
                 if p2:
@@ -528,6 +835,8 @@ def draw_avatar(surface, points, style="astronaut", sprites=None, zmap=None):
                 if "glove" in sprites:
                     ang = _angle(p2, p1) if p2 else 0.0
                     blit_centered(surface, sprites["glove"], p1, radius * 2.4, radius * 2.4, ang)
+                elif style == "robot":
+                    draw_robot_hand(surface, points, a, b, colors)
                 else:
                     pygame.draw.circle(surface, colors["glove"], _i(p1), int(radius))
                     pygame.draw.circle(surface, colors["outline"], _i(p1), int(radius), 2)
@@ -544,6 +853,8 @@ def draw_avatar(surface, points, style="astronaut", sprites=None, zmap=None):
                     direction = (p1[0], p1[1] + 20)
                 if "boot" in sprites:
                     blit_along_bone(surface, sprites["boot"], p1, direction, thickness=13)
+                elif style == "robot":
+                    draw_robot_foot(surface, p1, direction, colors)
                 else:
                     draw_capsule(surface, p1, direction, 10, colors["boot"], colors["outline"])
                     sole = _offset(direction, _angle(p1, direction), 4)
@@ -566,9 +877,23 @@ def draw_avatar(surface, points, style="astronaut", sprites=None, zmap=None):
         glove_items.append((_part_z(zmap, wrist), "glove", wrist, elbow, name, p, _pt(points, elbow)))
 
     _draw_subset(legs, boot_items)
+    if style == "robot":
+        for joint, proximal, distal in (
+            (L_KNEE, L_HIP, L_ANKLE),
+            (R_KNEE, R_HIP, R_ANKLE),
+        ):
+            draw_robot_hinge(surface, points, joint, proximal, distal, colors)
     draw_torso(surface, points, colors, sprites, style)
     _draw_subset(arms, glove_items)
-    draw_neck(surface, points, colors)
+    if style == "robot":
+        for joint, proximal, distal in (
+            (L_ELBOW, L_SHOULDER, L_WRIST),
+            (R_ELBOW, R_SHOULDER, R_WRIST),
+        ):
+            draw_robot_hinge(surface, points, joint, proximal, distal, colors)
+        draw_robot_neck(surface, points, colors)
+    else:
+        draw_neck(surface, points, colors)
     draw_head(surface, points, colors, sprites, style)
 
 
