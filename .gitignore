@@ -34,3 +34,11 @@ cmake-build-*/
 .vscode/
 *.swp
 *~
+
+# Web app. The pose model and MediaPipe wasm are fetched by web/scripts/fetch-assets.mjs.
+node_modules/
+web/public/mediapipe/
+web/public/models/
+web/test-results/
+web/playwright-report/
+web/blob-report/

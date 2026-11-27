@@ -56,3 +56,15 @@ Mouse testing: the pointer moves P1. With `--players 2`, **WASD** or the arrow k
 ## Pose model
 
 `models/pose_landmarker_lite.task` (about 5 MB) is not stored in git. `./setup.sh` downloads the official MediaPipe lite model when the file is missing, and leaves an existing copy alone. The game does the same on the first pose-mode launch. A fresh clone only needs `./setup.sh` (or a pose-mode launch) to fetch it.
+
+## Web app
+
+The same game also runs in the browser from [web/](web/README.md). It uses the webcam through MediaPipe. An Xbox Kinect is not available in the browser; that sensor stays on the Mac app above (`./run.sh`, including `--depth`).
+
+![Two-player meteor round in the browser](web/screenshot.png)
+
+After this is on `main`, the site is published by GitHub Actions to:
+
+https://richard747.github.io/starcamgame/
+
+Pages is off until you turn it on. In the repo on GitHub: **Settings → Pages → Build and deployment → Source → GitHub Actions**, then save. The next push to `main` that touches `web/` (or a manual run of the “Deploy Star Pop web” workflow) publishes the app.
